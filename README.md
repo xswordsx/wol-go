@@ -8,7 +8,26 @@ A simple Wake-On-Lan service with a minimal HTTP front-end.
 go build -o wol-go .
 ```
 
-## Configuring
+## Running
 
-There's currently only one option:
-- `addr` - The address on which the service will start (default is `0.0.0.0:8080`)
+```bash
+wol-go -config path/to/config.json
+```
+
+### Configuring
+
+The service expects a config file in a JSON format, consisting of:
+
+```js
+{
+    "address": "[<ip>]:<port> on which the service will listen",
+    "broadcast": "The IPv4 broadcast of the network",
+    "machines": [
+        {
+            "name": "Human-friendly identifier",
+            "mac": "MAC address of the machine in hex format, separated by ':'",
+            "ports": [/* A list of ports (uint16) on which to send the magic packet */]
+        }
+    ]
+}
+```

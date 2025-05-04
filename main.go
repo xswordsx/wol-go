@@ -4,9 +4,11 @@ package main
 
 import (
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -16,31 +18,59 @@ import (
 )
 
 var (
-	//go:embed pages/page.html
+	//go:embed page.html
 	htmlPage string
-
-	//go:embed pages/ok.html
-	okPage string
+	cfg      config
 )
 
+type pageData struct {
+	Machines []machine
+	SentName string
+}
+
 func main() {
-	addr := flag.String("addr", ":8080", "Address on which the service will listen")
+	cfgPath := flag.String("config", "config.json", "Path to configuration file")
 	flag.Parse()
 
-	if addr == nil || *addr == "" {
-		fmt.Fprintln(os.Stderr, "addr must be non-empty")
+	if cfgPath == nil || *cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "-config must be non-empty")
 		os.Exit(1)
 	}
 
 	logger := log.New(os.Stdout, "[wol-go] ", log.Ltime|log.Lmicroseconds)
 
-	logger.Println("Starting service on http://127.0.0.1:8080")
+	f, err := os.Open(*cfgPath)
+	if err != nil {
+		log.Fatalf("Cannot read config file: %v", err)
+	}
+	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
+		log.Fatalf("Cannot decode config file: %v", err)
+	}
+	f.Close()
+
+	for i, m := range cfg.Machines {
+		if err := m.validate(); err != nil {
+			log.Fatalf("Machine #%d: %v", i+1, err)
+		}
+	}
+
+	tpl, err := template.New("main_page").Parse(htmlPage)
+	if err != nil {
+		log.Fatalf("Cannot parse HTML template: %v", err)
+	}
+
+	logger.Printf("Starting service on http://%s", cfg.Address)
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(htmlPage)) })
-	mux.HandleFunc("POST /", handleWakeup)
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if err := tpl.Execute(w, pageData{Machines: cfg.Machines}); err != nil {
+			log.Printf("Cannot execute template: %v", err)
+			http.Error(w, "Failed to execute template", http.StatusInternalServerError)
+		}
+	})
+	mux.HandleFunc("POST /", handleWakeup(cfg.BroadcastAddress, cfg.Machines, tpl))
 
 	server := http.Server{
-		Addr:           *addr,
+		Addr:           cfg.Address,
 		Handler:        mux,
 		MaxHeaderBytes: 512,
 	}
@@ -51,33 +81,37 @@ func main() {
 	logger.Println("Exiting")
 }
 
-func handleWakeup(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, fmt.Sprintf("cannot parse form: %v", err), http.StatusInternalServerError)
-		return
-	}
-	var (
-		ip    = r.Form.Get("ip")
-		mac   = r.Form.Get("mac")
-		ports = r.Form.Get("port")
-	)
-	if ip == "" || mac == "" || ports == "" {
-		http.Error(w, "Missing parameter", http.StatusBadRequest)
-		return
-	}
+func handleWakeup(broadcast string, machines []machine, tpl *template.Template) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, fmt.Sprintf("cannot parse form: %v", err), http.StatusInternalServerError)
+			return
+		}
+		i, err := strconv.Atoi(r.FormValue("machine"))
+		if err != nil {
+			http.Error(w, fmt.Sprintf("cannot parse machine id: %v", err), http.StatusInternalServerError)
+			return
+		}
+		if i < 0 || i >= len(machines) {
+			http.Error(w, "Machine id out of range", http.StatusInternalServerError)
+			return
+		}
 
-	for _, port := range r.Form["port"] {
-		if err := sendMagicPacket(ip, mac, port); err != nil {
-			http.Error(
-				w,
-				fmt.Sprintf("could not send packet to %s:%s: %v", ip, port, err),
-				http.StatusInternalServerError,
-			)
+		mach := machines[i]
+		for _, port := range mach.Ports {
+			err := sendMagicPacket(broadcast, mach.MACAddress, strconv.Itoa(int(port)))
+			if err != nil {
+				http.Error(w, fmt.Sprintf("Failed to send magic packet to machine: %v", err), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		err = tpl.Execute(w, pageData{Machines: machines, SentName: mach.Name})
+		if err != nil {
+			http.Error(w, "Failed to execute template", http.StatusInternalServerError)
 			return
 		}
 	}
-
-	w.Write([]byte(okPage))
 }
 
 func sendMagicPacket(ip string, mac string, port string) error {
