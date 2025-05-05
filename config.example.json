@@ -1,0 +1,16 @@
+{
+    "address": "0.0.0.0:8080",
+    "broadcast": "192.168.1.255",
+    "machines": [
+        {
+            "name": "Raspberry Pi",
+            "mac": "AA:BB:CC:DD:EE:FF",
+            "ports": [7, 9]
+        },
+        {
+            "name": "Toaster",
+            "mac": "f2-6a-8c-dd-21-2c",
+            "ports": [9]
+        }
+    ]
+}
