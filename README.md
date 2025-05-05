@@ -25,7 +25,7 @@ The service expects a config file in a JSON format, consisting of:
     "machines": [
         {
             "name": "Human-friendly identifier",
-            "mac": "MAC address of the machine in hex format, separated by ':'",
+            "mac": "MAC address of the machine in hex format, separated by ':' or '-'",
             "ports": [/* A list of ports (uint16) on which to send the magic packet */]
         }
     ]
