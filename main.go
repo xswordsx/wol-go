@@ -4,6 +4,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -84,12 +85,12 @@ func main() {
 func handleWakeup(broadcast string, machines []machine, tpl *template.Template) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, fmt.Sprintf("cannot parse form: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Cannot parse form: %v", err), http.StatusInternalServerError)
 			return
 		}
 		i, err := strconv.Atoi(r.FormValue("machine"))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("cannot parse machine id: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Cannot parse machine id: %v", err), http.StatusInternalServerError)
 			return
 		}
 		if i < 0 || i >= len(machines) {
@@ -99,7 +100,7 @@ func handleWakeup(broadcast string, machines []machine, tpl *template.Template) 
 
 		mach := machines[i]
 		for _, port := range mach.Ports {
-			err := sendMagicPacket(broadcast, mach.MACAddress, strconv.Itoa(int(port)))
+			err := sendMagicPacket(fmt.Sprintf("%s:%d", broadcast, port), mach.MACAddress)
 			if err != nil {
 				http.Error(w, fmt.Sprintf("Failed to send magic packet to machine: %v", err), http.StatusInternalServerError)
 				return
@@ -114,28 +115,40 @@ func handleWakeup(broadcast string, machines []machine, tpl *template.Template) 
 	}
 }
 
-func sendMagicPacket(ip string, mac string, port string) error {
-	conn, err := net.Dial("udp", ip+":"+port)
+func magicPacket(mac string) ([]byte, error) {
+	packet := [102]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	r := strings.NewReplacer(
+		":", "",
+		"-", "",
+		" ", "",
+	)
+	clearMac := r.Replace(mac)
+	macBytes, err := hex.DecodeString(clearMac)
+	if err != nil {
+		return nil, fmt.Errorf("invalid symbols in mac address: %w", err)
+	}
+	if len(macBytes) != 6 {
+		return nil, errors.New("mac address size mismatch")
+	}
+	for i := 1; i <= 16; i++ {
+		copy(packet[6*i:], macBytes[:])
+	}
+
+	return packet[:], nil
+}
+
+func sendMagicPacket(addr string, mac string) error {
+	packet, err := magicPacket(mac)
+	if err != nil {
+		return fmt.Errorf("cannot generate magic packet: %w", err)
+	}
+	conn, err := net.Dial("udp4", addr)
 	if err != nil {
 		return fmt.Errorf("cannot dial network: %w", err)
 	}
 	defer conn.Close()
 
-	var packet = [102]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	var macBytes = [6]byte{}
-	for i, sval := range strings.Split(mac, ":") {
-		val, err := strconv.ParseUint(sval, 16, 8)
-		if err != nil {
-			return fmt.Errorf("could not decode byte %q: %w", sval, err)
-		}
-		macBytes[i] = byte(val)
-	}
-
-	for i := 1; i <= 16; i++ {
-		copy(packet[6*i:], macBytes[:])
-	}
-
-	n, err := conn.Write(packet[:])
+	n, err := conn.Write(packet)
 	if err != nil {
 		return fmt.Errorf("cannot write magic packet to addr: %w", err)
 	}
