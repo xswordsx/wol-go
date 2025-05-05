@@ -10,13 +10,16 @@ import (
 	"flag"
 	"fmt"
 	"html/template"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"strings"
 )
+
+type requestID int
+
+const requestIDKey requestID = 0
 
 var (
 	//go:embed page.html
@@ -38,81 +41,55 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := log.New(os.Stdout, "[wol-go] ", log.Ltime|log.Lmicroseconds)
+	logger := slog.New(slog.NewTextHandler(
+		os.Stdout,
+		&slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		},
+	)).With("pid", os.Getpid())
 
 	f, err := os.Open(*cfgPath)
 	if err != nil {
-		log.Fatalf("Cannot read config file: %v", err)
+		fmt.Fprintf(os.Stderr, "Cannot read config file: %v", err)
+		os.Exit(1)
 	}
 	if err := json.NewDecoder(f).Decode(&cfg); err != nil {
-		log.Fatalf("Cannot decode config file: %v", err)
+		fmt.Fprintf(os.Stderr, "Cannot decode config file: %v", err)
+		os.Exit(1)
 	}
 	f.Close()
 
 	for i, m := range cfg.Machines {
 		if err := m.validate(); err != nil {
-			log.Fatalf("Machine #%d: %v", i+1, err)
+			logger.Error("Bad machine configuration", "machine_id", i+1)
+			os.Exit(1)
 		}
 	}
 
 	tpl, err := template.New("main_page").Parse(htmlPage)
 	if err != nil {
-		log.Fatalf("Cannot parse HTML template: %v", err)
+		logger.Error("Cannot parse HTML template", "error", err)
+		os.Exit(1)
 	}
 
-	logger.Printf("Starting service on http://%s", cfg.Address)
+	logger.Debug("Setting up service")
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if err := tpl.Execute(w, pageData{Machines: cfg.Machines}); err != nil {
-			log.Printf("Cannot execute template: %v", err)
-			http.Error(w, "Failed to execute template", http.StatusInternalServerError)
-		}
-	})
-	mux.HandleFunc("POST /", handleWakeup(cfg.BroadcastAddress, cfg.Machines, tpl))
+	mux.HandleFunc("GET /", getWakeUp(tpl, logger))
+	mux.HandleFunc("POST /", postWakeUp(cfg.BroadcastAddress, cfg.Machines, tpl, logger))
 
 	server := http.Server{
 		Addr:           cfg.Address,
-		Handler:        mux,
+		Handler:        requestIDMiddleware(mux),
 		MaxHeaderBytes: 512,
 	}
 
+	logger.Info("Starting HTTP server", "address", "http://"+cfg.Address)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		logger.Fatalf("HTTP Server stopped unexpectedly: %v", err)
+		logger.Error("HTTP Server stopped unexpectedly", "error", err)
+		os.Exit(1)
 	}
-	logger.Println("Exiting")
-}
-
-func handleWakeup(broadcast string, machines []machine, tpl *template.Template) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, fmt.Sprintf("Cannot parse form: %v", err), http.StatusInternalServerError)
-			return
-		}
-		i, err := strconv.Atoi(r.FormValue("machine"))
-		if err != nil {
-			http.Error(w, fmt.Sprintf("Cannot parse machine id: %v", err), http.StatusInternalServerError)
-			return
-		}
-		if i < 0 || i >= len(machines) {
-			http.Error(w, "Machine id out of range", http.StatusInternalServerError)
-			return
-		}
-
-		mach := machines[i]
-		for _, port := range mach.Ports {
-			err := sendMagicPacket(fmt.Sprintf("%s:%d", broadcast, port), mach.MACAddress)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Failed to send magic packet to machine: %v", err), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		err = tpl.Execute(w, pageData{Machines: machines, SentName: mach.Name})
-		if err != nil {
-			http.Error(w, "Failed to execute template", http.StatusInternalServerError)
-			return
-		}
-	}
+	logger.Info("Exiting")
 }
 
 func magicPacket(mac string) ([]byte, error) {
